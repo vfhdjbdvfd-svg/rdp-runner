@@ -22,8 +22,8 @@ on:
 
 jobs:
   rdp-setup:
-    if: "startsWith(inputs.windows_version, 'windows') || inputs.windows_version == ''"
-    runs-on: ${{ inputs.windows_version != '' && inputs.windows_version || 'windows-2022' }}
+    if: "startsWith(inputs.windows_version, 'windows') || startsWith(inputs.windows_version, 'win') || inputs.windows_version == ''"
+    runs-on: ${{ (inputs.windows_version == 'windows-2025' || inputs.windows_version == 'win2025-ai') && 'windows-2025' || 'windows-2022' }}
     timeout-minutes: 360 # 6 hours max runtime
     steps:
       - name: Download and extract Ngrok v3
@@ -169,6 +169,104 @@ jobs:
             "redirectclipboard:i:1"
           ) | Out-File -FilePath rdp-connection.rdp -Encoding ascii
 
+      - name: Install and Configure OpenCode AI with REA and Ollama (Windows AI Edition)
+        if: "inputs.windows_version == 'win2022-ai' || inputs.windows_version == 'win2025-ai'"
+        shell: pwsh
+        run: |
+          Write-Output "[*] Setting up Integrated AI Environment (OpenCode + REA + Ollama)..."
+          try {
+            npm install -g opencode-ai rea-agents --force
+          } catch {
+            Write-Output "[!] NPM install warning: $_"
+          }
+          try {
+            Write-Output "[*] Installing Ollama local AI engine..."
+            Invoke-WebRequest "https://ollama.com/download/OllamaSetup.exe" -OutFile "$env:TEMP\OllamaSetup.exe" -UseBasicParsing
+            Start-Process "$env:TEMP\OllamaSetup.exe" -ArgumentList "/silent" -Wait
+            $ollamaPath = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+            if (Test-Path $ollamaPath) {
+              $env:PATH += ";$env:LOCALAPPDATA\Programs\Ollama"
+              Start-Process $ollamaPath -ArgumentList "serve" -WindowStyle Hidden
+              Start-Sleep -Seconds 3
+              Write-Output "[*] Pulling Qwen 2.5 Coder lightweight model for offline AI..."
+              & $ollamaPath pull qwen2.5-coder:1.5b
+            }
+          } catch {
+            Write-Output "[!] Ollama setup note: $_"
+          }
+          $cfg = @{
+            "`$schema" = "https://opencode.ai/config.json"
+            provider = @{
+              ollama = @{
+                npm = "@ai-sdk/openai-compatible"
+                name = "Ollama (Local AI)"
+                options = @{
+                  baseURL = "http://127.0.0.1:11434/v1"
+                }
+              }
+            }
+            mcp = @{
+              rea = @{
+                type = "local"
+                command = @("npx", "-y", "rea-agents", "mcp")
+                enabled = $true
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+          $targetDirs = @(
+            "C:\Users\runneradmin\.config\opencode",
+            "C:\Users\runneradmin\AppData\Roaming\opencode",
+            "C:\Users\runneradmin"
+          )
+          foreach ($d in $targetDirs) {
+            if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+            Set-Content -Path "$d\opencode.json" -Value $cfg -Encoding UTF8
+          }
+          $desktopPath = "C:\Users\runneradmin\Desktop"
+          if (-not (Test-Path $desktopPath)) { New-Item -ItemType Directory -Path $desktopPath -Force | Out-Null }
+          $openCodeBat = @(
+            "@echo off",
+            "title OpenCode AI Assistant (Integrated with REA + Ollama)",
+            "color 0A",
+            "echo =======================================================================",
+            "echo   [+] OpenCode AI Agent + REA MCP + Local Ollama Engine",
+            "echo   [+] Type your prompt or coding task below:",
+            "echo =======================================================================",
+            "echo.",
+            "cd /d C:\Users\runneradmin",
+            "call opencode",
+            "pause"
+          )
+          Set-Content -Path "$desktopPath\OpenCode AI.bat" -Value $openCodeBat -Encoding UTF8
+          $reaBat = @(
+            "@echo off",
+            "title REA Reverse Engineering Agent",
+            "color 0B",
+            "echo =======================================================================",
+            "echo   [+] REA - Reverse Engineer Anything (MCP Engine)",
+            "echo =======================================================================",
+            "echo.",
+            "cd /d C:\Users\runneradmin",
+            "call rea-agents",
+            "pause"
+          )
+          Set-Content -Path "$desktopPath\REA Tools.bat" -Value $reaBat -Encoding UTF8
+          $ollamaBat = @(
+            "@echo off",
+            "title Local AI Models Manager (Ollama)",
+            "color 0E",
+            "echo =======================================================================",
+            "echo   [+] Local AI Model Manager (Ollama)",
+            "echo   Available models: qwen2.5-coder:1.5b",
+            "echo   To chat locally: ollama run qwen2.5-coder:1.5b",
+            "echo =======================================================================",
+            "echo.",
+            "ollama list",
+            "cmd /k"
+          )
+          Set-Content -Path "$desktopPath\Local AI Models.bat" -Value $ollamaBat -Encoding UTF8
+          Write-Output "[+] OpenCode + REA + Ollama integrated successfully on Windows!"
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -198,128 +296,9 @@ jobs:
           try { C:\Windows\System32\ngrok.exe service stop } catch {}
           try { C:\Windows\System32\ngrok.exe service uninstall } catch {}
 
-  macos-setup:
-    if: "startsWith(inputs.windows_version, 'mac')"
-    runs-on: macos-14
-    timeout-minutes: 360 # 6 hours max runtime
-    steps:
-      - name: Optimize System and Enable Screen Sharing & SSH
-        run: |
-          set +e
-          echo "[*] Configuring Apple Remote Desktop and Screen Sharing..."
-          
-          # Create Fazah admin user with password Fazah@123
-          sudo sysadminctl -addUser Fazah -password Fazah@123 -admin 2>/dev/null || true
-
-          # Set VNC password directly in VNCSettings
-          echo "Fazah@123" | perl -we '
-            BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA" };
-            $_ = <>; chomp; s/^(.{8}).*/$1/;
-            @p = unpack "C*", $_;
-            foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) };
-            print "\n"
-          ' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null 2>&1 || true
-
-          # Configure Apple Remote Desktop service
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -allowAccessFor -allUsers -privs -all 2>/dev/null || true
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw Fazah@123 2>/dev/null || true
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -restart -agent -console 2>/dev/null || true
-
-          # Enable SSH Remote Login
-          sudo systemsetup -setremotelogin on 2>/dev/null || true
-          echo "[+] Remote access configured successfully!"
-
-      - name: Install and Configure Ngrok
-        id: ngrok-tunnel
-        run: |
-          echo "[*] Installing Ngrok for macOS ARM64 Apple Silicon..."
-          curl -s -L -o ngrok.zip https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip
-          unzip -q -o ngrok.zip
-          sudo mv ngrok /usr/local/bin/ngrok
-          sudo chmod +x /usr/local/bin/ngrok
-          rm -f ngrok.zip
-
-          tok="${{ inputs.ngrok_token }}"
-          if [ -z "$tok" ]; then tok="${{ secrets.NGROK_AUTH_TOKEN }}"; fi
-          ngrok config add-authtoken "$tok"
-
-          reg="${{ inputs.ngrok_region }}"
-          if [ -z "$reg" ] || [ "$reg" = "gb" ]; then reg="eu"; fi
-
-          echo "[*] Starting Ngrok TCP tunnel on VNC port 5900..."
-          nohup ngrok tcp 5900 --region "$reg" --log=stdout > /tmp/ngrok.log 2>&1 &
-
-          sleep 3
-          tunnel_url=""
-          for i in $(seq 1 30); do
-            tunnel_url=$(curl -s http://127.0.0.1:4040/api/tunnels | grep -o 'tcp://[^"]*' | head -n1 | sed 's|tcp://||')
-            if [ -n "$tunnel_url" ]; then
-              break
-            fi
-            sleep 2
-          done
-
-          if [ -n "$tunnel_url" ]; then
-            echo "tunnel_url=$tunnel_url" >> $GITHUB_OUTPUT
-            echo "[+] macOS Screen Sharing Tunnel: $tunnel_url"
-          else
-            echo "[!] Failed to establish tunnel"
-            cat /tmp/ngrok.log 2>/dev/null || true
-            exit 1
-          fi
-
-      - name: Build Connection Artifacts
-        run: |
-          url="${{ steps.ngrok-tunnel.outputs.tunnel_url }}"
-          host=$(echo "$url" | cut -d: -f1)
-          port=$(echo "$url" | cut -d: -f2)
-          
-          # Create rdp-connection.rdp for compatibility
-          echo "full address:s:$url" > rdp-connection.rdp
-          echo "username:s:runner" >> rdp-connection.rdp
-          echo "prompt for credentials:i:1" >> rdp-connection.rdp
-          echo "screen mode id:i:2" >> rdp-connection.rdp
-          echo "desktopwidth:i:1920" >> rdp-connection.rdp
-          echo "desktopheight:i:1080" >> rdp-connection.rdp
-          echo "$url" >> rdp-connection.rdp
-          
-          # Create direct .vnc file
-          echo "[Connection]" > macos.vnc
-          echo "Host=$host" >> macos.vnc
-          echo "Port=$port" >> macos.vnc
-          echo "Password=Fazah@123" >> macos.vnc
-          echo "[Options]" >> macos.vnc
-          echo "RelativePtr=1" >> macos.vnc
-          echo "FullColor=1" >> macos.vnc
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdp-connection
-          path: |
-            rdp-connection.rdp
-            macos.vnc
-          retention-days: 1
-
-      - name: Keep Alive Session
-        run: |
-          echo "[+] macOS session is active (${{ steps.ngrok-tunnel.outputs.tunnel_url }})! Keeping session active..."
-          reg="${{ inputs.ngrok_region }}"
-          if [ -z "$reg" ] || [ "$reg" = "gb" ]; then reg="eu"; fi
-          while true; do
-            if ! pgrep -x "ngrok" > /dev/null; then
-              echo "[!] Ngrok stopped. Restarting tunnel..."
-              nohup ngrok tcp 5900 --region "$reg" --log=stdout > /tmp/ngrok.log 2>&1 &
-            fi
-            sleep 60
-          done
-
   vps-setup:
-    if: "!startsWith(inputs.windows_version, 'windows') && !startsWith(inputs.windows_version, 'mac') && inputs.windows_version != ''"
-    runs-on: ubuntu-latest
+    if: "!startsWith(inputs.windows_version, 'windows') && !startsWith(inputs.windows_version, 'win') && !startsWith(inputs.windows_version, 'mac') && inputs.windows_version != ''"
+    runs-on: ${{ (inputs.windows_version == 'ubuntu-24.04' || inputs.windows_version == 'ubuntu24-ai' || inputs.windows_version == 'ubuntu24-gui-ai') && 'ubuntu-24.04' || ((inputs.windows_version == 'ubuntu-22.04' || inputs.windows_version == 'ubuntu22-ai' || inputs.windows_version == 'ubuntu22-gui-ai') && 'ubuntu-22.04' || 'ubuntu-latest') }}
     timeout-minutes: 360 # 6 hours max runtime
     steps:
       - name: Optimize Disk and Configure RAM Swap
@@ -352,7 +331,7 @@ jobs:
           ngrok config add-authtoken "$tok"
 
       - name: Setup GUI Desktop and XRDP
-        if: "endsWith(inputs.windows_version, '-gui') || inputs.windows_version == 'android-cloud' || inputs.windows_version == 'ai-dev'"
+        if: "endsWith(inputs.windows_version, '-gui') || endsWith(inputs.windows_version, '-gui-ai') || inputs.windows_version == 'android-cloud' || inputs.windows_version == 'ai-dev'"
         run: |
           TARGET_OS="${{ inputs.windows_version }}"
           echo "[+] Installing XFCE Desktop & XRDP with Xorg driver for $TARGET_OS..."
@@ -422,7 +401,7 @@ jobs:
           echo "TARGET_PORT=3389" >> $GITHUB_ENV
 
       - name: Setup Native Ubuntu VPS SSH
-        if: "startsWith(inputs.windows_version, 'ubuntu') && !endsWith(inputs.windows_version, '-gui') && inputs.windows_version != 'android-cloud' && inputs.windows_version != 'ai-dev'"
+        if: "(startsWith(inputs.windows_version, 'ubuntu') || startsWith(inputs.windows_version, 'ubuntu2')) && !contains(inputs.windows_version, '-gui') && inputs.windows_version != 'android-cloud' && inputs.windows_version != 'ai-dev'"
         run: |
           echo "[+] Configuring Native Ubuntu host SSH..."
           echo "root:Fazah@123" | sudo chpasswd
@@ -438,8 +417,40 @@ jobs:
           echo 'echo "========================================================="' >> /home/runner/.bashrc
           echo "TARGET_PORT=22" >> $GITHUB_ENV
 
+      - name: Install and Configure OpenCode AI with REA and Ollama (Ubuntu AI Edition)
+        if: "inputs.windows_version == 'ubuntu22-ai' || inputs.windows_version == 'ubuntu24-ai' || endsWith(inputs.windows_version, '-gui-ai')"
+        run: |
+          echo "[*] Setting up Integrated AI Environment (OpenCode + REA + Ollama) on Ubuntu..."
+          sudo npm install -g opencode-ai rea-agents || curl -fsSL https://opencode.ai/install | bash || true
+          sudo ln -sf $(which rea-agents) /usr/local/bin/rea 2>/dev/null || true
+          echo "[*] Installing Ollama local AI engine..."
+          curl -fsSL https://ollama.com/install.sh | sh || true
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          sleep 4
+          echo "[*] Pulling Qwen 2.5 Coder 1.5B model for offline AI..."
+          ollama pull qwen2.5-coder:1.5b || true
+          mkdir -p /home/runner/.config/opencode /home/runner
+          echo '{"$schema":"https://opencode.ai/config.json","provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","name":"Ollama (Local AI)","options":{"baseURL":"http://127.0.0.1:11434/v1"}}},"mcp":{"rea":{"type":"local","command":["npx","-y","rea-agents","mcp"],"enabled":true}}}' | tee /home/runner/.config/opencode/opencode.json /home/runner/opencode.json > /dev/null
+          sudo chown -R runner:runner /home/runner/.config /home/runner/opencode.json
+          echo 'echo "======================================================================="' >> /home/runner/.bashrc
+          echo 'echo " [AI] Welcome to AI Developer Cloud (OpenCode + REA + Ollama)"' >> /home/runner/.bashrc
+          echo 'echo " [*] OpenCode AI Agent:   Type '''opencode''' (Integrated with REA + Ollama)"' >> /home/runner/.bashrc
+          echo 'echo " [*] REA Reverse Eng:     Type '''rea''' or '''rea-agents'''"' >> /home/runner/.bashrc
+          echo 'echo " [*] Local AI Engine:      Type '''ollama list''' or '''ollama run qwen2.5-coder:1.5b'''"' >> /home/runner/.bashrc
+          echo 'echo "======================================================================="' >> /home/runner/.bashrc
+          echo 'alias rea="rea-agents"' >> /home/runner/.bashrc
+          if [[ "${{ inputs.windows_version }}" =~ -gui-ai$ ]]; then
+            mkdir -p /home/runner/Desktop
+            printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=OpenCode AI + REA\nComment=AI Coding Assistant\nExec=xfce4-terminal -e "opencode"\nIcon=utilities-terminal\nPath=/home/runner\nTerminal=false\nStartupNotify=true\n' > /home/runner/Desktop/OpenCode.desktop
+            printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=REA Agent\nComment=Reverse Engineer Anything\nExec=xfce4-terminal -e "rea-agents"\nIcon=utilities-terminal\nPath=/home/runner\nTerminal=false\nStartupNotify=true\n' > /home/runner/Desktop/REA-Agent.desktop
+            printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Local AI (Ollama)\nComment=Local AI Models\nExec=xfce4-terminal -e "ollama run qwen2.5-coder:1.5b"\nIcon=utilities-terminal\nPath=/home/runner\nTerminal=false\nStartupNotify=true\n' > /home/runner/Desktop/Local-AI.desktop
+            chmod +x /home/runner/Desktop/*.desktop
+            sudo chown -R runner:runner /home/runner/Desktop
+          fi
+          echo "[+] Integrated AI Environment Ready on Ubuntu!"
+
       - name: Setup Containerized Distro VPS SSH
-        if: "!startsWith(inputs.windows_version, 'ubuntu') && !endsWith(inputs.windows_version, '-gui') && inputs.windows_version != 'android-cloud' && inputs.windows_version != 'ai-dev'"
+        if: "!startsWith(inputs.windows_version, 'ubuntu') && !startsWith(inputs.windows_version, 'ubuntu2') && !endsWith(inputs.windows_version, '-gui') && !endsWith(inputs.windows_version, '-gui-ai') && inputs.windows_version != 'android-cloud' && inputs.windows_version != 'ai-dev'"
         run: |
           TARGET_OS="${{ inputs.windows_version }}"
           echo "[+] Preparing Containerized VPS for: $TARGET_OS"
@@ -519,7 +530,7 @@ jobs:
           url="${{ steps.ngrok-tunnel.outputs.tunnel_url }}"
           port="${{ env.TARGET_PORT }}"
           user_name="runner"
-          if [[ "${{ inputs.windows_version }}" =~ ^windows ]]; then user_name="Fazah"; fi
+          if [[ "${{ inputs.windows_version }}" =~ ^win ]]; then user_name="Fazah"; fi
           
           echo "full address:s:$url" > rdp-connection.rdp
           echo "username:s:$user_name" >> rdp-connection.rdp
